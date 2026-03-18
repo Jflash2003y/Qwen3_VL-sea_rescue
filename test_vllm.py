@@ -1,12 +1,23 @@
 """
 vLLM 版 V2 微调模型测试
 使用合并后的模型 + val 集评估
+
+修复内容：
+1. OMP_NUM_THREADS 环境变量修复（必须在 import torch/vllm 之前设置）
+2. vLLM multi_modal_data 需要传入 PIL.Image 对象，而非文件路径字符串
+3. 修复报告标题乱码
 """
+
+# ★ 修复1：必须在 import torch/vllm 之前设置，否则 vLLM 内部调用
+#   torch.set_num_threads() 时会因为无效的 OMP_NUM_THREADS 值而崩溃
 import os
+os.environ["OMP_NUM_THREADS"] = str(max(1, os.cpu_count() or 1))
+
 import json
 import re
 import time
 import torch
+from PIL import Image
 from vllm import LLM, SamplingParams
 from transformers import AutoProcessor
 
@@ -80,7 +91,7 @@ def load_val_labels(val_json):
                         assistant_text = c['text']
                 break
 
-        # 解析坐标: "类别：(x1, y1, x2, y2)" 格式
+        # 解析坐标: "类别：(x1, y1, x2, y2)" 格���
         pattern = r'([\u4e00-\u9fff]+)[\s：:]*[\(（]\s*(\d+)\s*[,，]\s*(\d+)\s*[,，]\s*(\d+)\s*[,，]\s*(\d+)\s*[\)）]'
         matches = re.findall(pattern, assistant_text)
 
@@ -182,9 +193,11 @@ def main():
     print("=" * 60)
     print("  🚀 vLLM 版 V2 微调模型测试 (val 集)")
     print(f"  GPU: {torch.cuda.get_device_name(0)}")
-    print(f"  显存: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.0f} GB" 
-          if hasattr(torch.cuda.get_device_properties(0), 'total_mem')
-          else f"  显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.0f} GB")
+    try:
+        vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    except Exception:
+        vram = 0
+    print(f"  显存: {vram:.0f} GB")
     print("=" * 60)
 
     # 加载 val 标签
@@ -258,7 +271,11 @@ def main():
         for g in gts:
             print(f"    ▫ {g['label']}: ({g['bbox'][0]}, {g['bbox'][1]}, {g['bbox'][2]}, {g['bbox'][3]})")
 
-        # 构建 vLLM 输入
+        # ★ 修复2：vLLM 的 multi_modal_data 需要 PIL.Image 对象，不能传文件路径字符串
+        #   原代码传的是 "file:///root/..." 字符串，vLLM 无法解析会报错
+        pil_image = Image.open(img_path).convert("RGB")
+
+        # 构建 vLLM 输入（chat template 中的 image 占位符仍用 file:// 格式）
         messages = [
             {"role": "user", "content": [
                 {"type": "image", "image": f"file://{img_path}"},
@@ -275,7 +292,7 @@ def main():
             {
                 "prompt": prompt_text,
                 "multi_modal_data": {
-                    "image": f"file://{img_path}"
+                    "image": pil_image,  # ★ 传入 PIL.Image 对象
                 },
             },
             sampling_params=sampling_params,
@@ -335,7 +352,7 @@ def main():
         if ious:
             print(f" | 本张IoU: {sum(ious)/len(ious):.4f}", end="")
         print()
-        print(f"  ⏱️  本张: {infer_time:.1f}s | 累计 P:{cum_p:.1f}% R:{cum_r:.1f}% | 剩余≈{remaining/60:.1f}分钟")
+        print(f"  ⏱️  本张: {infer_time:.1f}s | 累计 P:{cum_p:.1f}% R:{cum_r:.1f}% | 剩���≈{remaining/60:.1f}分钟")
 
         # 显示模型回复（截取）
         resp_short = response[:150].replace('\n', ' ')
@@ -352,8 +369,9 @@ def main():
     total_time = time.time() - start_time
     avg_infer = sum(infer_times) / len(infer_times) if infer_times else 0
 
+    # ★ 修复3：原代码这里的 emoji 是乱码 "����"，替换为正确的 📊
     print("\n\n" + "=" * 60)
-    print("  ���� vLLM 版 V2 微调模型 测试报告 (val 集)")
+    print("  📊 vLLM 版 V2 微调模型 测试报告 (val 集)")
     print("=" * 60)
     print(f"  测试图片数:     {len(valid_images)}")
     print(f"  真实目标总数:   {total_tp + total_fn}")
@@ -381,7 +399,7 @@ def main():
         print(f"    {cat:8s}  {det:3d}/{tot:<3d}  {bar} {rate:.1f}%")
 
     print("\n" + "=" * 60)
-    print("  ✅ 测试完成！")
+    print("  ✅ 测��完成！")
     print("=" * 60)
 
 
